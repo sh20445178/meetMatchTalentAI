@@ -25,12 +25,15 @@ export function parseWordFile(file) {
 
 /**
  * Extract structured resume information from raw text.
+ * @param {string} text - The full text of the resume.
+ * @param {string} [nameHint] - Optional name hint (e.g. largest font text from PDF).
+ * @param {string} [fileName] - Original filename, used as last resort for name extraction.
  */
-export function extractResumeInfo(text) {
+export function extractResumeInfo(text, nameHint, fileName) {
   const lines = text.split('\n').filter(l => l.trim());
 
   return {
-    name: extractName(lines),
+    name: extractName(lines, nameHint, fileName),
     email: extractEmail(text),
     phone: extractPhone(text),
     skills: extractSkills(text),
@@ -58,17 +61,166 @@ export function extractJobDescription(text) {
   };
 }
 
-function extractName(lines) {
-  // First non-empty line is often the name
-  if (lines.length > 0) {
-    const first = lines[0].trim();
-    // Check if it looks like a name (2-4 words, mostly letters)
-    const words = first.split(/\s+/);
-    if (words.length >= 1 && words.length <= 5 && words.every(w => /^[A-Za-z.\-']+$/.test(w))) {
-      return first;
+// Common English words, resume headings, and filler that should never be part of a name
+const NOISE_WORDS = new Set([
+  // determiners & pronouns
+  'a', 'an', 'the', 'this', 'that', 'these', 'those', 'my', 'your', 'his', 'her', 'its',
+  'our', 'their', 'i', 'me', 'we', 'us', 'he', 'she', 'it', 'they', 'them',
+  // prepositions & conjunctions
+  'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'from', 'as', 'into', 'about',
+  'and', 'or', 'but', 'nor', 'so', 'yet', 'if', 'then', 'than',
+  // verbs & auxiliaries
+  'is', 'am', 'are', 'was', 'were', 'be', 'been', 'being', 'have', 'has', 'had',
+  'do', 'does', 'did', 'will', 'would', 'shall', 'should', 'may', 'might', 'can',
+  'could', 'must', 'not', 'no',
+  // common resume/filler words
+  'resume', 'cv', 'curriculum', 'vitae', 'summary', 'objective', 'profile',
+  'personal', 'details', 'information', 'contact', 'address', 'phone', 'email',
+  'mobile', 'number', 'date', 'birth', 'gender', 'nationality', 'marital', 'status',
+  'education', 'experience', 'skills', 'work', 'professional', 'career', 'history',
+  'employment', 'qualification', 'qualifications', 'achievements', 'projects',
+  'references', 'hobbies', 'interests', 'languages', 'certifications', 'awards',
+  'responsibilities', 'duties', 'description', 'job', 'position', 'role',
+  'seeking', 'looking', 'dedicated', 'motivated', 'experienced', 'results',
+  'driven', 'oriented', 'passionate', 'dynamic', 'detail', 'team', 'player',
+  'developer', 'engineer', 'manager', 'analyst', 'designer', 'consultant',
+  'specialist', 'coordinator', 'administrator', 'architect', 'lead', 'senior',
+  'junior', 'intern', 'trainee', 'software', 'web', 'full', 'stack', 'front',
+  'end', 'back', 'data', 'years', 'year', 'over', 'more',
+]);
+
+function isNoisyWord(w) {
+  return NOISE_WORDS.has(w.toLowerCase());
+}
+
+/**
+ * Strip emails, phone numbers, URLs, and special chars from a text line,
+ * leaving only clean alphabetic tokens.
+ */
+function stripContactInfo(text) {
+  return text
+    // remove emails
+    .replace(/[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g, ' ')
+    // remove URLs / LinkedIn
+    .replace(/(?:https?:\/\/|www\.)[^\s]+/gi, ' ')
+    .replace(/linkedin\.com[^\s]*/gi, ' ')
+    // remove phone numbers (various formats)
+    .replace(/(?:\+?\d{1,3}[-.\s]?)?(?:\(?\d{2,4}\)?[-.\s]?)?\d{3,4}[-.\s]?\d{3,4}/g, ' ')
+    // remove standalone digits / numeric strings
+    .replace(/\b\d+\b/g, ' ')
+    // remove common separators & symbols (pipes, bullets, colons, etc.)
+    .replace(/[|·•●►▪,:;#@()\[\]{}<>\/\\]+/g, ' ')
+    // collapse whitespace
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * From a cleaned string, extract consecutive alphabetic tokens
+ * that look like a person's name (2-4 words, not noise).
+ */
+function findNameInCleanedText(cleaned) {
+  // Allow single-character initials (like "J.") as well as full words
+  const words = cleaned.split(/\s+/).filter(w => /^[A-Za-z][A-Za-z.\-']*$/.test(w));
+
+  // Slide a window of 2-4 consecutive non-noise words
+  for (let size = 2; size <= Math.min(4, words.length); size++) {
+    for (let start = 0; start <= words.length - size; start++) {
+      const chunk = words.slice(start, start + size);
+      const nonNoise = chunk.filter(w => !isNoisyWord(w));
+      if (nonNoise.length >= 2) {
+        return toTitleCase(nonNoise.join(' '));
+      }
     }
   }
+
+  // Fallback: if there's exactly 1 non-noise word with 3+ chars, return it
+  const nonNoiseAll = words.filter(w => !isNoisyWord(w) && w.length >= 3);
+  if (nonNoiseAll.length === 1) {
+    return toTitleCase(nonNoiseAll[0]);
+  }
+
+  return null;
+}
+
+function extractName(lines, nameHint, fileName) {
+  const fullText = lines.join('\n');
+
+  // --- Strategy 0: Use nameHint from PDF (largest font on page 1) ---
+  if (nameHint) {
+    // nameHint may contain multiple lines (one per font size)
+    for (const hintLine of nameHint.split('\n')) {
+      const cleaned = stripContactInfo(hintLine);
+      const name = findNameInCleanedText(cleaned);
+      if (name) {
+        console.log('[Name Extract] Found via nameHint:', name, '| raw hint:', hintLine);
+        return name;
+      }
+    }
+  }
+
+  // --- Strategy 1: Explicit "Name:" label ---
+  const nameLabel = fullText.match(/\bname\s*[:\-–]\s*(.+)/i);
+  if (nameLabel) {
+    const cleaned = stripContactInfo(nameLabel[1]);
+    const name = findNameInCleanedText(cleaned);
+    if (name) return name;
+  }
+
+  // --- Strategy 2: Clean the first line and extract name ---
+  if (lines.length > 0) {
+    const cleaned = stripContactInfo(lines[0]);
+    const name = findNameInCleanedText(cleaned);
+    if (name) return name;
+  }
+
+  // --- Strategy 3: Clean each of the first 10 lines and look for a name ---
+  for (const line of lines.slice(1, 10)) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const cleaned = stripContactInfo(trimmed);
+    const name = findNameInCleanedText(cleaned);
+    if (name) return name;
+  }
+
+  // --- Strategy 4: Look after Personal Summary / Profile / About Me header ---
+  const summaryHeader = fullText.match(/(?:personal\s+summary|about\s+me|profile|summary)\s*[:\-–]?\s*\n?\s*(.+)/i);
+  if (summaryHeader) {
+    const cleaned = stripContactInfo(summaryHeader[1]);
+    const name = findNameInCleanedText(cleaned);
+    if (name) return name;
+  }
+
+  // --- Strategy 5: Split entire top section by double-space / pipe / newline ---
+  const segments = fullText.split(/\s{2,}|\n|\|/).filter(s => s.trim());
+  for (const seg of segments.slice(0, 25)) {
+    const cleaned = stripContactInfo(seg);
+    const name = findNameInCleanedText(cleaned);
+    if (name) return name;
+  }
+
+  console.log('[Name Extract] All strategies failed. First 5 lines:', lines.slice(0, 5));
+  if (nameHint) console.log('[Name Extract] nameHint was:', nameHint);
+
+  // --- Strategy 6: Try to extract name from the filename ---
+  if (fileName) {
+    // Remove extension, replace separators with spaces
+    const baseName = fileName.replace(/\.[^.]+$/, '').replace(/[_\-+.]+/g, ' ');
+    const cleaned = stripContactInfo(baseName);
+    const name = findNameInCleanedText(cleaned);
+    if (name) {
+      console.log('[Name Extract] Found via filename:', name);
+      return name;
+    }
+  }
+
   return 'Unknown';
+}
+
+function toTitleCase(str) {
+  return str.replace(/\w\S*/g, (txt) =>
+    txt.charAt(0).toUpperCase() + txt.substr(1).toLowerCase()
+  );
 }
 
 function extractEmail(text) {

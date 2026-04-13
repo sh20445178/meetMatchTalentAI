@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { FileText, Upload, Star, CheckCircle, XCircle, AlertCircle } from 'lucide-react';
+import { FileText, Upload, Star, CheckCircle, XCircle, AlertCircle, Trash2 } from 'lucide-react';
 import FileUpload from '../components/FileUpload';
 import { parseWordFile, extractResumeInfo, extractJobDescription } from '../services/wordParser';
 import { parsePdfFile } from '../services/pdfParser';
@@ -18,6 +18,7 @@ export default function ResumeMatcher() {
   const [resumeDataList, setResumeDataList] = useState([]);
   const [rankings, setRankings] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [progress, setProgress] = useState(0);
   const [error, setError] = useState(null);
   const [selectedResume, setSelectedResume] = useState(null);
 
@@ -40,16 +41,20 @@ export default function ResumeMatcher() {
 
   const handleResumeUpload = async (files) => {
     setLoading(true);
+    setProgress(0);
     setError(null);
     try {
       const fileList = Array.isArray(files) ? files : [files];
       setResumeFiles(prev => [...prev, ...fileList]);
 
+      const total = fileList.length;
       const newResumes = [];
-      for (const file of fileList) {
+      for (let i = 0; i < total; i++) {
+        const file = fileList[i];
         const parsed = await parseFile(file);
-        const info = extractResumeInfo(parsed.text);
+        const info = extractResumeInfo(parsed.text, parsed.nameHint, file.name);
         newResumes.push({ ...info, fileName: file.name });
+        setProgress(Math.round(((i + 1) / total) * 100));
       }
 
       const allResumes = [...resumeDataList, ...newResumes];
@@ -63,6 +68,20 @@ export default function ResumeMatcher() {
       setError('Failed to parse resume(s): ' + err.message);
     } finally {
       setLoading(false);
+      setProgress(0);
+    }
+  };
+
+  const deleteResume = (index) => {
+    const updatedResumes = resumeDataList.filter((_, i) => i !== index);
+    const updatedFiles = resumeFiles.filter((_, i) => i !== index);
+    setResumeDataList(updatedResumes);
+    setResumeFiles(updatedFiles);
+    setSelectedResume(null);
+    if (jdData && updatedResumes.length > 0) {
+      setRankings(rankResumes(updatedResumes, jdData));
+    } else {
+      setRankings([]);
     }
   };
 
@@ -120,16 +139,31 @@ export default function ResumeMatcher() {
             )}
           </div>
 
-          <div className="upload-section">
+          <div className={`upload-section${!jdData ? ' upload-section--disabled' : ''}`}>
             <h3><Upload size={18} /> Resumes ({resumeDataList.length} uploaded)</h3>
-            <FileUpload onFileSelect={handleResumeUpload} accept=".docx,.pdf" label="Upload Resume(s) (.docx or .pdf)" multiple />
-            {loading && <p className="loading-text">Parsing resumes...</p>}
+            {!jdData && <p className="upload-section__hint">Please upload a Job Description first</p>}
+            <FileUpload onFileSelect={handleResumeUpload} accept=".docx,.pdf" label="Upload Resume(s) (.docx or .pdf)" multiple disabled={!jdData} />
+            {loading && (
+              <div className="progress-container">
+                <div className="progress-bar">
+                  <div className="progress-bar__fill" style={{ width: `${progress}%` }} />
+                </div>
+                <p className="progress-text">Parsing files... {progress}%</p>
+              </div>
+            )}
             {resumeDataList.length > 0 && (
               <div className="uploaded-list">
                 {resumeDataList.map((r, i) => (
                   <div key={i} className="uploaded-file uploaded-file--small">
                     <FileText size={14} />
                     <span>{r.name || r.fileName}</span>
+                    <button
+                      className="btn-icon btn-icon--danger"
+                      title="Remove resume"
+                      onClick={() => deleteResume(i)}
+                    >
+                      <Trash2 size={14} />
+                    </button>
                   </div>
                 ))}
               </div>

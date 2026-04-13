@@ -1,19 +1,20 @@
 import { useCallback, useState } from 'react';
 import { Upload } from 'lucide-react';
 
-export default function FileUpload({ onFileSelect, accept, label, multiple = false }) {
+export default function FileUpload({ onFileSelect, accept, label, multiple = false, disabled = false }) {
   const [dragActive, setDragActive] = useState(false);
 
   const handleDrag = useCallback((e) => {
     e.preventDefault();
     e.stopPropagation();
-    setDragActive(e.type === 'dragenter' || e.type === 'dragover');
-  }, []);
+    if (!disabled) setDragActive(e.type === 'dragenter' || e.type === 'dragover');
+  }, [disabled]);
 
   const handleDrop = useCallback((e) => {
     e.preventDefault();
     e.stopPropagation();
     setDragActive(false);
+    if (disabled) return;
     const files = Array.from(e.dataTransfer.files);
     if (files.length > 0) {
       onFileSelect(multiple ? files : files[0]);
@@ -29,7 +30,7 @@ export default function FileUpload({ onFileSelect, accept, label, multiple = fal
 
   return (
     <div
-      className={`file-upload ${dragActive ? 'file-upload--active' : ''}`}
+      className={`file-upload ${dragActive ? 'file-upload--active' : ''} ${disabled ? 'file-upload--disabled' : ''}`}
       onDragEnter={handleDrag}
       onDragLeave={handleDrag}
       onDragOver={handleDrag}
@@ -49,6 +50,7 @@ export default function FileUpload({ onFileSelect, accept, label, multiple = fal
         multiple={multiple}
         onChange={handleChange}
         className="file-upload__input"
+        disabled={disabled}
       />
     </div>
   );
