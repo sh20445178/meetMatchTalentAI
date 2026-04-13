@@ -40,6 +40,7 @@ export default function FileUpload({ onFileSelect, accept, label, multiple = fal
       <p className="file-upload__hint">
         {accept === '.xlsx,.xls' ? 'Supports .xlsx and .xls files' :
          accept === '.docx' ? 'Supports .docx files' :
+         accept === '.docx,.pdf' ? 'Supports .docx and .pdf files' :
          `Accepted: ${accept}`}
       </p>
       <input

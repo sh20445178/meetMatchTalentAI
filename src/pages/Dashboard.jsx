@@ -10,7 +10,7 @@ const STATUS_COLORS = {
   Interview: '#3b82f6',
   Offered: '#f59e0b',
   Hired: '#16a34a',
-  Rejected: '#ef4444',
+  Rejected: '#d97706',
 };
 
 const PRIORITY_COLORS = {
@@ -55,12 +55,12 @@ export default function Dashboard() {
       statusCounts[s] = (statusCounts[s] || 0) + 1;
     });
 
-    const clientCounts = {};
-    jobPositions.forEach(j => {
-      const c = j.client || 'Unknown';
-      if (!clientCounts[c]) clientCounts[c] = { openings: 0, filled: 0 };
-      clientCounts[c].openings += j.openings || 0;
-      clientCounts[c].filled += j.filled || 0;
+    const sourceCounts = {};
+    candidates.forEach(c => {
+      const s = c.source || 'Unknown';
+      if (!sourceCounts[s]) sourceCounts[s] = { total: 0, hired: 0 };
+      sourceCounts[s].total += 1;
+      if ((c.status || '').toLowerCase() === 'hired') sourceCounts[s].hired += 1;
     });
 
     const priorityCounts = {};
@@ -70,20 +70,20 @@ export default function Dashboard() {
     });
 
     const statusChartData = Object.entries(statusCounts).map(([name, value]) => ({ name, value }));
-    const clientChartData = Object.entries(clientCounts).map(([name, data]) => ({
+    const sourceChartData = Object.entries(sourceCounts).map(([name, data]) => ({
       name,
-      openings: data.openings,
-      filled: data.filled,
-      remaining: data.openings - data.filled,
+      total: data.total,
+      hired: data.hired,
+      inPipeline: data.total - data.hired,
     }));
     const priorityChartData = Object.entries(priorityCounts).map(([name, value]) => ({ name, value }));
 
     return {
       totalCandidates, totalPositions, totalOpenings, totalFilled, fillRate,
-      statusCounts, statusChartData, clientChartData, priorityChartData,
+      statusCounts, statusChartData, sourceChartData, priorityChartData,
       openPositions: jobPositions.filter(j => (j.status || '').toLowerCase() !== 'closed').length,
-      hiredCount: statusCounts['Hired'] || 0,
-      inPipeline: totalCandidates - (statusCounts['Hired'] || 0) - (statusCounts['Rejected'] || 0),
+      hiredCount: candidates.filter(c => (c.status || '').toLowerCase() === 'hired').length,
+      inPipeline: totalCandidates - candidates.filter(c => (c.status || '').toLowerCase() === 'hired').length - candidates.filter(c => (c.status || '').toLowerCase() === 'rejected').length,
     };
   }, [data]);
 
@@ -145,29 +145,45 @@ export default function Dashboard() {
             <h3>Candidate Pipeline</h3>
             <ResponsiveContainer width="100%" height={280}>
               <PieChart>
-                <Pie data={stats.statusChartData} cx="50%" cy="50%" outerRadius={100} dataKey="value" label={({ name, value }) => `${name} (${value})`}>
+                <Pie
+                  data={stats.statusChartData}
+                  cx="50%" cy="50%"
+                  outerRadius={90}
+                  dataKey="value"
+                  label={({ cx, cy, midAngle, outerRadius, name, value }) => {
+                    const RADIAN = Math.PI / 180;
+                    const radius = outerRadius + 20;
+                    const x = cx + radius * Math.cos(-midAngle * RADIAN);
+                    const y = cy + radius * Math.sin(-midAngle * RADIAN);
+                    return (
+                      <text x={x} y={y} textAnchor={x > cx ? 'start' : 'end'} dominantBaseline="central" fontSize={11} fill="#334155">
+                        {`${name} (${value})`}
+                      </text>
+                    );
+                  }}
+                >
                   {stats.statusChartData.map((entry) => (
                     <Cell key={entry.name} fill={STATUS_COLORS[entry.name] || '#94a3b8'} />
                   ))}
                 </Pie>
                 <Tooltip />
-                <Legend />
+                <Legend iconSize={10} wrapperStyle={{ fontSize: 12 }} />
               </PieChart>
             </ResponsiveContainer>
           </div>
 
-          {/* Client Fulfillment Chart */}
+          {/* Sourcing Partner Chart */}
           <div className="chart-card">
-            <h3>Client Fulfillment</h3>
+            <h3>Sourcing Partner</h3>
             <ResponsiveContainer width="100%" height={280}>
-              <BarChart data={stats.clientChartData}>
+              <BarChart data={stats.sourceChartData}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
                 <XAxis dataKey="name" tick={{ fontSize: 12 }} />
                 <YAxis tick={{ fontSize: 12 }} />
                 <Tooltip />
                 <Legend />
-                <Bar dataKey="filled" name="Filled" fill="#16a34a" radius={[4, 4, 0, 0]} />
-                <Bar dataKey="remaining" name="Remaining" fill="#e2e8f0" radius={[4, 4, 0, 0]} />
+                <Bar dataKey="hired" name="Hired" fill="#16a34a" radius={[4, 4, 0, 0]} />
+                <Bar dataKey="inPipeline" name="In Pipeline" fill="#3b82f6" radius={[4, 4, 0, 0]} />
               </BarChart>
             </ResponsiveContainer>
           </div>

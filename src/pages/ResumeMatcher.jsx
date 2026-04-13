@@ -2,7 +2,14 @@ import { useState } from 'react';
 import { FileText, Upload, Star, CheckCircle, XCircle, AlertCircle } from 'lucide-react';
 import FileUpload from '../components/FileUpload';
 import { parseWordFile, extractResumeInfo, extractJobDescription } from '../services/wordParser';
+import { parsePdfFile } from '../services/pdfParser';
 import { matchResumeToJob, rankResumes } from '../services/matchingEngine';
+
+function parseFile(file) {
+  const ext = file.name.split('.').pop().toLowerCase();
+  if (ext === 'pdf') return parsePdfFile(file);
+  return parseWordFile(file);
+}
 
 export default function ResumeMatcher() {
   const [jdFile, setJdFile] = useState(null);
@@ -17,7 +24,7 @@ export default function ResumeMatcher() {
   const handleJdUpload = async (file) => {
     setError(null);
     try {
-      const parsed = await parseWordFile(file);
+      const parsed = await parseFile(file);
       const jd = extractJobDescription(parsed.text);
       setJdFile(file);
       setJdData(jd);
@@ -40,7 +47,7 @@ export default function ResumeMatcher() {
 
       const newResumes = [];
       for (const file of fileList) {
-        const parsed = await parseWordFile(file);
+        const parsed = await parseFile(file);
         const info = extractResumeInfo(parsed.text);
         newResumes.push({ ...info, fileName: file.name });
       }
@@ -85,7 +92,7 @@ export default function ResumeMatcher() {
     <div className="page">
       <div className="page__header">
         <h1>Resume &ndash; JD Matcher</h1>
-        <p>Upload a Job Description and resumes (Word .docx) to find the best matching candidates.</p>
+        <p>Upload a Job Description and resumes (.docx or .pdf) to find the best matching candidates.</p>
         {(jdData || resumeDataList.length > 0) && (
           <button className="btn btn--secondary" onClick={clearAll} style={{ marginTop: 8 }}>Clear All</button>
         )}
@@ -109,13 +116,13 @@ export default function ResumeMatcher() {
                 </div>
               </div>
             ) : (
-              <FileUpload onFileSelect={handleJdUpload} accept=".docx" label="Upload Job Description (.docx)" />
+              <FileUpload onFileSelect={handleJdUpload} accept=".docx,.pdf" label="Upload Job Description (.docx or .pdf)" />
             )}
           </div>
 
           <div className="upload-section">
             <h3><Upload size={18} /> Resumes ({resumeDataList.length} uploaded)</h3>
-            <FileUpload onFileSelect={handleResumeUpload} accept=".docx" label="Upload Resume(s) (.docx)" multiple />
+            <FileUpload onFileSelect={handleResumeUpload} accept=".docx,.pdf" label="Upload Resume(s) (.docx or .pdf)" multiple />
             {loading && <p className="loading-text">Parsing resumes...</p>}
             {resumeDataList.length > 0 && (
               <div className="uploaded-list">
