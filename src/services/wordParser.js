@@ -1,26 +1,82 @@
 import mammoth from 'mammoth';
+import { readFileAsArrayBuffer } from './fileReader';
 
 /**
  * Parse a Word (.docx) file and extract text content.
  */
-export function parseWordFile(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = async (e) => {
-      try {
-        const arrayBuffer = e.target.result;
-        const result = await mammoth.extractRawText({ arrayBuffer });
-        resolve({
-          text: result.value,
-          messages: result.messages,
-        });
-      } catch (err) {
-        reject(new Error('Failed to parse Word file: ' + err.message));
-      }
+/**
+ * As a last resort, read the .docx as raw text and scrape XML content.
+ * A .docx is a ZIP file containing XML; raw text extraction can recover
+ * readable fragments from the XML tags (e.g. <w:t>text</w:t>).
+ */
+async function extractTextFromRawDocx(file) {
+  try {
+    const raw = await file.text();
+    if (!raw || raw.length === 0) return null;
+    // Extract text from <w:t ...>...</w:t> tags (Word XML)
+    const wtMatches = raw.match(/<w:t[^>]*>([^<]+)<\/w:t>/g);
+    if (wtMatches && wtMatches.length > 0) {
+      const texts = wtMatches.map(m => m.replace(/<\/?w:t[^>]*>/g, ''));
+      const joined = texts.join(' ').replace(/\s+/g, ' ').trim();
+      if (joined.length > 20) return joined;
+    }
+    // Fallback: extract anything that looks like readable text (no binary junk)
+    const readable = raw.replace(/[^\x20-\x7E\n\r\t]/g, ' ')
+      .replace(/\s+/g, ' ').trim();
+    // Only return if we got meaningful content
+    if (readable.length > 50) return readable;
+    return null;
+  } catch (e) {
+    console.warn('[Word Parser] Raw text extraction failed:', e.message);
+    return null;
+  }
+}
+
+export async function parseWordFile(file) {
+  let arrayBuffer;
+  try {
+    arrayBuffer = await readFileAsArrayBuffer(file);
+  } catch (err) {
+    // readFileAsArrayBuffer failed — try raw text extraction as last resort
+    console.warn('[Word Parser] ArrayBuffer read failed, trying raw text extraction...');
+    const rawText = await extractTextFromRawDocx(file);
+    if (rawText) {
+      return { text: rawText, messages: [{ type: 'warning', message: 'Extracted via raw text (DLP fallback)' }] };
+    }
+    throw err;
+  }
+
+  if (!arrayBuffer || arrayBuffer.byteLength === 0) {
+    // Try raw text before giving up
+    const rawText = await extractTextFromRawDocx(file);
+    if (rawText) {
+      return { text: rawText, messages: [{ type: 'warning', message: 'Extracted via raw text (empty buffer fallback)' }] };
+    }
+    throw new Error('File "' + file.name + '" is empty or could not be read.');
+  }
+
+  try {
+    const result = await mammoth.extractRawText({ arrayBuffer });
+    if (!result.value || result.value.trim().length === 0) {
+      throw new Error('No text content found in "' + file.name + '". The file may be image-based or corrupted.');
+    }
+    return {
+      text: result.value,
+      messages: result.messages,
     };
-    reader.onerror = () => reject(new Error('Failed to read file'));
-    reader.readAsArrayBuffer(file);
-  });
+  } catch (err) {
+    if (err.message && err.message.startsWith('No text content')) throw err;
+    console.error('[Word Parser] mammoth error for', file.name, err);
+    // Try raw text extraction before failing entirely
+    const rawText = await extractTextFromRawDocx(file);
+    if (rawText) {
+      return { text: rawText, messages: [{ type: 'warning', message: 'Extracted via raw text (mammoth fallback)' }] };
+    }
+    throw new Error(
+      'Could not parse "' + file.name + '". Make sure it is a valid .docx file (not .doc). ' +
+      (err.message || '')
+    );
+  }
 }
 
 /**
@@ -30,18 +86,102 @@ export function parseWordFile(file) {
  * @param {string} [fileName] - Original filename, used as last resort for name extraction.
  */
 export function extractResumeInfo(text, nameHint, fileName) {
-  const lines = text.split('\n').filter(l => l.trim());
+  const normalized = normalizeResumeText(text);
+  const lines = normalized.split('\n').filter(l => l.trim());
 
   return {
     name: extractName(lines, nameHint, fileName),
-    email: extractEmail(text),
-    phone: extractPhone(text),
-    skills: extractSkills(text),
-    experience: extractExperience(text),
-    education: extractEducation(text),
+    email: extractEmail(normalized),
+    phone: extractPhone(normalized),
+    skills: extractSkills(normalized),
+    experience: extractExperience(normalized),
+    education: extractEducation(normalized),
     summary: extractSummary(lines),
-    rawText: text,
+    rawText: normalized,
   };
+}
+
+// Standard section headings to recognize in any format
+const SECTION_HEADINGS = [
+  'personal summary', 'professional summary', 'career summary', 'summary',
+  'objective', 'career objective', 'profile', 'about me', 'about',
+  'experience', 'work experience', 'professional experience', 'employment history',
+  'work history', 'career history',
+  'education', 'academic qualifications', 'qualifications',
+  'skills', 'technical skills', 'core competencies', 'key skills',
+  'certifications', 'certificates', 'licenses',
+  'projects', 'key projects', 'notable projects',
+  'achievements', 'accomplishments', 'awards',
+  'languages', 'interests', 'hobbies', 'references',
+  'contact', 'contact information', 'personal details', 'personal information',
+];
+
+/**
+ * Normalize raw resume text into a standard, clean format.
+ * - Fixes encoding artifacts and special characters
+ * - Collapses extra whitespace and blank lines
+ * - Standardizes section headings
+ * - Ensures each section heading appears on its own line
+ * - Cleans up bullet characters and list markers
+ */
+function normalizeResumeText(text) {
+  let t = text;
+
+  // Fix common encoding artifacts
+  t = t.replace(/\u00a0/g, ' ');               // non-breaking space → space
+  t = t.replace(/\u2018|\u2019/g, "'");         // smart quotes
+  t = t.replace(/\u201c|\u201d/g, '"');         // smart double quotes
+  t = t.replace(/\u2013|\u2014/g, '-');         // en/em dash → hyphen
+  t = t.replace(/\u2026/g, '...');              // ellipsis
+  t = t.replace(/\ufffd/g, '');                 // replacement character
+  t = t.replace(/\r\n/g, '\n').replace(/\r/g, '\n'); // normalize line endings
+
+  // Standardize bullet characters to a simple dash
+  t = t.replace(/[•●►▸▪■◆○◇➤➢✓✔→⇒]/g, '-');
+  t = t.replace(/^\s*[▪·∙⋅]\s*/gm, '- ');
+
+  // Collapse multiple spaces (but preserve newlines)
+  t = t.replace(/[^\S\n]+/g, ' ');
+
+  // Collapse 3+ blank lines into 2
+  t = t.replace(/\n{3,}/g, '\n\n');
+
+  // Ensure section headings are on their own line and standardized
+  // Build a regex that matches any known heading (case-insensitive)
+  const headingPattern = SECTION_HEADINGS
+    .sort((a, b) => b.length - a.length) // longest first to avoid partial matches
+    .map(h => h.replace(/\s+/g, '\\s+'))
+    .join('|');
+
+  const headingRegex = new RegExp(
+    `(?:^|\\n)\\s*(${headingPattern})\\s*[:–\\-]?\\s*(?=\\n|$)`,
+    'gim'
+  );
+
+  t = t.replace(headingRegex, (match, heading) => {
+    // Capitalize the heading
+    const standardized = heading.trim().replace(/\b\w/g, c => c.toUpperCase());
+    return '\n\n' + standardized + '\n';
+  });
+
+  // Also handle inline headings (heading followed by content on same line)
+  const inlineHeadingRegex = new RegExp(
+    `(?:^|\\n)\\s*(${headingPattern})\\s*[:–\\-]\\s*(.+)`,
+    'gim'
+  );
+
+  t = t.replace(inlineHeadingRegex, (match, heading, content) => {
+    const standardized = heading.trim().replace(/\b\w/g, c => c.toUpperCase());
+    return '\n\n' + standardized + '\n' + content.trim();
+  });
+
+  // Trim each line
+  t = t.split('\n').map(l => l.trim()).join('\n');
+
+  // Final cleanup: collapse leading/trailing blank lines
+  t = t.replace(/^\n+/, '').replace(/\n+$/, '');
+
+  return t;
 }
 
 /**
@@ -89,8 +229,27 @@ const NOISE_WORDS = new Set([
   'end', 'back', 'data', 'years', 'year', 'over', 'more',
 ]);
 
+// Company/org indicators — if a candidate name contains these, it's likely a company
+const COMPANY_WORDS = new Set([
+  'ltd', 'llc', 'llp', 'inc', 'corp', 'corporation', 'company', 'co',
+  'limited', 'pvt', 'private', 'public', 'group', 'holdings', 'enterprise',
+  'enterprises', 'solutions', 'services', 'technologies', 'technology', 'tech',
+  'consulting', 'consultancy', 'systems', 'global', 'international', 'industries',
+  'associates', 'partners', 'digital', 'infotech', 'infosys', 'wipro', 'tcs',
+  'cognizant', 'accenture', 'capgemini', 'deloitte', 'google', 'microsoft',
+  'amazon', 'apple', 'facebook', 'meta', 'oracle', 'ibm', 'samsung', 'intel',
+  'cisco', 'adobe', 'salesforce', 'sap', 'hcl', 'mindtree', 'mphasis',
+  'hexaware', 'persistent', 'zensar', 'lti', 'ltimindtree', 'cyient', 'virtusa',
+  'employer', 'client', 'organization', 'organisation',
+]);
+
 function isNoisyWord(w) {
   return NOISE_WORDS.has(w.toLowerCase());
+}
+
+function looksLikeCompany(candidate) {
+  const words = candidate.toLowerCase().split(/\s+/);
+  return words.some(w => COMPANY_WORDS.has(w));
 }
 
 /**
@@ -117,7 +276,7 @@ function stripContactInfo(text) {
 
 /**
  * From a cleaned string, extract consecutive alphabetic tokens
- * that look like a person's name (2-4 words, not noise).
+ * that look like a person's name (2-4 words, not noise, not a company).
  */
 function findNameInCleanedText(cleaned) {
   // Allow single-character initials (like "J.") as well as full words
@@ -129,13 +288,16 @@ function findNameInCleanedText(cleaned) {
       const chunk = words.slice(start, start + size);
       const nonNoise = chunk.filter(w => !isNoisyWord(w));
       if (nonNoise.length >= 2) {
-        return toTitleCase(nonNoise.join(' '));
+        const candidate = nonNoise.join(' ');
+        if (!looksLikeCompany(candidate)) {
+          return toTitleCase(candidate);
+        }
       }
     }
   }
 
   // Fallback: if there's exactly 1 non-noise word with 3+ chars, return it
-  const nonNoiseAll = words.filter(w => !isNoisyWord(w) && w.length >= 3);
+  const nonNoiseAll = words.filter(w => !isNoisyWord(w) && w.length >= 3 && !COMPANY_WORDS.has(w.toLowerCase()));
   if (nonNoiseAll.length === 1) {
     return toTitleCase(nonNoiseAll[0]);
   }
@@ -143,12 +305,51 @@ function findNameInCleanedText(cleaned) {
   return null;
 }
 
+/**
+ * Try to derive a candidate name from their email address.
+ * E.g. "john.doe@gmail.com" → "John Doe", "madhu_rao123@wipro.com" → "Madhu Rao"
+ */
+function extractNameFromEmail(text) {
+  const emailMatch = text.match(/([a-zA-Z0-9._%+\-]+)@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/);
+  if (!emailMatch) return null;
+
+  const local = emailMatch[1];
+  // Split on dots, underscores, hyphens, and digits
+  const parts = local.split(/[._\-]+/).filter(p => /^[a-zA-Z]{2,}$/.test(p));
+
+  if (parts.length >= 2 && parts.length <= 4) {
+    const nonNoise = parts.filter(p => !isNoisyWord(p) && !COMPANY_WORDS.has(p.toLowerCase()));
+    if (nonNoise.length >= 2) {
+      return toTitleCase(nonNoise.join(' '));
+    }
+  }
+  return null;
+}
+
 function extractName(lines, nameHint, fileName) {
   const fullText = lines.join('\n');
 
-  // --- Strategy 0: Use nameHint from PDF (largest font on page 1) ---
+  // --- Strategy 0: Explicit "Name:" label (highest confidence) ---
+  const nameLabel = fullText.match(/\bname\s*[:\-–]\s*(.+)/i);
+  if (nameLabel) {
+    const cleaned = stripContactInfo(nameLabel[1]);
+    const name = findNameInCleanedText(cleaned);
+    if (name) {
+      console.log('[Name Extract] Found via "Name:" label:', name);
+      return name;
+    }
+  }
+
+  // --- Strategy 1: Derive name from email address (very reliable) ---
+  const emailName = extractNameFromEmail(fullText);
+  if (emailName) {
+    console.log('[Name Extract] Found via email:', emailName);
+    return emailName;
+  }
+
+  // --- Strategy 2: Use nameHint from PDF (largest font on page 1) ---
+  // Only if it doesn't look like a company name
   if (nameHint) {
-    // nameHint may contain multiple lines (one per font size)
     for (const hintLine of nameHint.split('\n')) {
       const cleaned = stripContactInfo(hintLine);
       const name = findNameInCleanedText(cleaned);
@@ -159,22 +360,14 @@ function extractName(lines, nameHint, fileName) {
     }
   }
 
-  // --- Strategy 1: Explicit "Name:" label ---
-  const nameLabel = fullText.match(/\bname\s*[:\-–]\s*(.+)/i);
-  if (nameLabel) {
-    const cleaned = stripContactInfo(nameLabel[1]);
-    const name = findNameInCleanedText(cleaned);
-    if (name) return name;
-  }
-
-  // --- Strategy 2: Clean the first line and extract name ---
+  // --- Strategy 3: Clean the first line and extract name ---
   if (lines.length > 0) {
     const cleaned = stripContactInfo(lines[0]);
     const name = findNameInCleanedText(cleaned);
     if (name) return name;
   }
 
-  // --- Strategy 3: Clean each of the first 10 lines and look for a name ---
+  // --- Strategy 4: Clean each of the first 10 lines ---
   for (const line of lines.slice(1, 10)) {
     const trimmed = line.trim();
     if (!trimmed) continue;
@@ -183,7 +376,7 @@ function extractName(lines, nameHint, fileName) {
     if (name) return name;
   }
 
-  // --- Strategy 4: Look after Personal Summary / Profile / About Me header ---
+  // --- Strategy 5: Look after Personal Summary / Profile / About Me header ---
   const summaryHeader = fullText.match(/(?:personal\s+summary|about\s+me|profile|summary)\s*[:\-–]?\s*\n?\s*(.+)/i);
   if (summaryHeader) {
     const cleaned = stripContactInfo(summaryHeader[1]);
@@ -191,7 +384,7 @@ function extractName(lines, nameHint, fileName) {
     if (name) return name;
   }
 
-  // --- Strategy 5: Split entire top section by double-space / pipe / newline ---
+  // --- Strategy 6: Split entire top section by double-space / pipe / newline ---
   const segments = fullText.split(/\s{2,}|\n|\|/).filter(s => s.trim());
   for (const seg of segments.slice(0, 25)) {
     const cleaned = stripContactInfo(seg);
@@ -199,12 +392,11 @@ function extractName(lines, nameHint, fileName) {
     if (name) return name;
   }
 
-  console.log('[Name Extract] All strategies failed. First 5 lines:', lines.slice(0, 5));
+  console.log('[Name Extract] All text strategies failed. First 5 lines:', lines.slice(0, 5));
   if (nameHint) console.log('[Name Extract] nameHint was:', nameHint);
 
-  // --- Strategy 6: Try to extract name from the filename ---
+  // --- Strategy 7: Extract name from the filename ---
   if (fileName) {
-    // Remove extension, replace separators with spaces
     const baseName = fileName.replace(/\.[^.]+$/, '').replace(/[_\-+.]+/g, ' ');
     const cleaned = stripContactInfo(baseName);
     const name = findNameInCleanedText(cleaned);

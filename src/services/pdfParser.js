@@ -1,4 +1,5 @@
 import { getDocument, GlobalWorkerOptions } from 'pdfjs-dist';
+import { readFileAsArrayBuffer } from './fileReader';
 
 // Use the bundled worker from pdfjs-dist
 GlobalWorkerOptions.workerSrc = new URL(
@@ -9,13 +10,11 @@ GlobalWorkerOptions.workerSrc = new URL(
 /**
  * Parse a PDF file and extract its text content.
  */
-export function parsePdfFile(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = async (e) => {
-      try {
-        const typedArray = new Uint8Array(e.target.result);
-        const pdf = await getDocument({ data: typedArray }).promise;
+export async function parsePdfFile(file) {
+  try {
+    const arrayBuffer = await readFileAsArrayBuffer(file);
+    const typedArray = new Uint8Array(arrayBuffer);
+    const pdf = await getDocument({ data: typedArray }).promise;
 
         const pages = [];
         let nameHint = '';
@@ -68,12 +67,11 @@ export function parsePdfFile(file) {
           pages.push(lineChunks.join(''));
         }
 
-        resolve({ text: pages.join('\n'), nameHint });
-      } catch (err) {
-        reject(new Error('Failed to parse PDF file: ' + err.message));
-      }
-    };
-    reader.onerror = () => reject(new Error('Failed to read file'));
-    reader.readAsArrayBuffer(file);
-  });
+        return { text: pages.join('\n'), nameHint };
+  } catch (err) {
+    if (err.message && /DLP|policy|blocked|security/i.test(err.message)) {
+      throw err; // Already descriptive from readFileAsArrayBuffer
+    }
+    throw new Error('Failed to parse PDF file: ' + err.message);
+  }
 }

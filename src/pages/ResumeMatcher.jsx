@@ -1,9 +1,21 @@
 import { useState } from 'react';
-import { FileText, Upload, Star, CheckCircle, XCircle, AlertCircle, Trash2 } from 'lucide-react';
+import { FileText, Upload, Star, CheckCircle, XCircle, AlertCircle, Trash2, ClipboardPaste, X } from 'lucide-react';
 import FileUpload from '../components/FileUpload';
 import { parseWordFile, extractResumeInfo, extractJobDescription } from '../services/wordParser';
 import { parsePdfFile } from '../services/pdfParser';
 import { matchResumeToJob, rankResumes } from '../services/matchingEngine';
+
+const ScoreBar = ({ label, score, color }) => (
+  <div className="score-bar">
+    <div className="score-bar__header">
+      <span>{label}</span>
+      <span className="score-bar__value">{score}%</span>
+    </div>
+    <div className="score-bar__track">
+      <div className="score-bar__fill" style={{ width: `${score}%`, backgroundColor: color || '#6366f1' }} />
+    </div>
+  </div>
+);
 
 function parseFile(file) {
   const ext = file.name.split('.').pop().toLowerCase();
@@ -21,6 +33,8 @@ export default function ResumeMatcher() {
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState(null);
   const [selectedResume, setSelectedResume] = useState(null);
+  const [pasteTarget, setPasteTarget] = useState(null); // index of DLP-blocked resume to paste text for
+  const [pasteText, setPasteText] = useState('');
 
   const handleJdUpload = async (file) => {
     setError(null);
@@ -43,33 +57,64 @@ export default function ResumeMatcher() {
     setLoading(true);
     setProgress(0);
     setError(null);
-    try {
-      const fileList = Array.isArray(files) ? files : [files];
-      setResumeFiles(prev => [...prev, ...fileList]);
+    const fileList = Array.isArray(files) ? files : [files];
+    setResumeFiles(prev => [...prev, ...fileList]);
 
-      const total = fileList.length;
-      const newResumes = [];
-      for (let i = 0; i < total; i++) {
-        const file = fileList[i];
+    const total = fileList.length;
+    const newResumes = [];
+    const failedFiles = [];
+
+    for (let i = 0; i < total; i++) {
+      const file = fileList[i];
+      try {
         const parsed = await parseFile(file);
         const info = extractResumeInfo(parsed.text, parsed.nameHint, file.name);
         newResumes.push({ ...info, fileName: file.name });
-        setProgress(Math.round(((i + 1) / total) * 100));
+      } catch (err) {
+        console.warn('[Resume Upload] Failed:', file.name, err.message);
+        const isDLP = /DLP|policy|blocked|security/i.test(err.message);
+        if (isDLP) {
+          // DLP blocked — create a minimal entry from filename
+          const baseName = file.name.replace(/\.[^.]+$/, '').replace(/[_\-+.]+/g, ' ').trim();
+          newResumes.push({
+            name: baseName.replace(/\b\w/g, c => c.toUpperCase()),
+            email: '',
+            phone: '',
+            skills: [],
+            experience: null,
+            education: [],
+            summary: 'Resume could not be parsed due to DLP policy. Limited matching available.',
+            rawText: '',
+            fileName: file.name,
+            dlpBlocked: true,
+          });
+          failedFiles.push(`"${file.name}" (DLP blocked — using filename only)`);
+        } else {
+          failedFiles.push(`"${file.name}" (${err.message})`);
+        }
       }
-
-      const allResumes = [...resumeDataList, ...newResumes];
-      setResumeDataList(allResumes);
-
-      if (jdData) {
-        const ranked = rankResumes(allResumes, jdData);
-        setRankings(ranked);
-      }
-    } catch (err) {
-      setError('Failed to parse resume(s): ' + err.message);
-    } finally {
-      setLoading(false);
-      setProgress(0);
+      setProgress(Math.round(((i + 1) / total) * 100));
     }
+
+    const allResumes = [...resumeDataList, ...newResumes];
+    setResumeDataList(allResumes);
+
+    if (jdData && allResumes.length > 0) {
+      const ranked = rankResumes(allResumes, jdData);
+      setRankings(ranked);
+    }
+
+    if (failedFiles.length > 0) {
+      const fullyParsed = newResumes.filter(r => !r.dlpBlocked).length;
+      const dlpCount = newResumes.filter(r => r.dlpBlocked).length;
+      const parts = [];
+      if (fullyParsed > 0) parts.push(`${fullyParsed} file(s) fully parsed`);
+      if (dlpCount > 0) parts.push(`${dlpCount} added with limited info (name from filename)`);
+      setError(parts.join(', ') + '. ' + failedFiles.join('; '));
+    }
+
+    setLoading(false);
+    setProgress(0);
   };
 
   const deleteResume = (index) => {
@@ -93,19 +138,25 @@ export default function ResumeMatcher() {
     setRankings([]);
     setSelectedResume(null);
     setError(null);
+    setPasteTarget(null);
+    setPasteText('');
   };
 
-  const ScoreBar = ({ label, score, color }) => (
-    <div className="score-bar">
-      <div className="score-bar__header">
-        <span>{label}</span>
-        <span className="score-bar__value">{score}%</span>
-      </div>
-      <div className="score-bar__track">
-        <div className="score-bar__fill" style={{ width: `${score}%`, backgroundColor: color || '#6366f1' }} />
-      </div>
-    </div>
-  );
+  const handlePasteSubmit = () => {
+    if (pasteTarget === null || !pasteText.trim()) return;
+    const text = pasteText.trim();
+    const fileName = resumeDataList[pasteTarget]?.fileName || 'resume.docx';
+    const info = extractResumeInfo(text, null, fileName);
+    const updatedResumes = [...resumeDataList];
+    updatedResumes[pasteTarget] = { ...info, fileName, dlpBlocked: false };
+    setResumeDataList(updatedResumes);
+    if (jdData) {
+      setRankings(rankResumes(updatedResumes, jdData));
+    }
+    setPasteTarget(null);
+    setPasteText('');
+    setError(null);
+  };
 
   return (
     <div className="page">
@@ -154,9 +205,19 @@ export default function ResumeMatcher() {
             {resumeDataList.length > 0 && (
               <div className="uploaded-list">
                 {resumeDataList.map((r, i) => (
-                  <div key={i} className="uploaded-file uploaded-file--small">
+                  <div key={i} className={`uploaded-file uploaded-file--small ${r.dlpBlocked ? 'uploaded-file--warning' : ''}`}>
                     <FileText size={14} />
                     <span>{r.name || r.fileName}</span>
+                    {r.dlpBlocked && (
+                      <button
+                        className="btn-icon btn-icon--paste"
+                        title="Paste resume text manually"
+                        onClick={() => { setPasteTarget(i); setPasteText(''); }}
+                      >
+                        <ClipboardPaste size={14} /> Paste Text
+                      </button>
+                    )}
+                    {r.dlpBlocked && <AlertCircle size={14} color="#f59e0b" title="DLP blocked — click Paste Text" />}
                     <button
                       className="btn-icon btn-icon--danger"
                       title="Remove resume"
@@ -257,6 +318,35 @@ export default function ResumeMatcher() {
           </div>
         )}
       </div>
+
+      {/* Paste Text Modal */}
+      {pasteTarget !== null && (
+        <div className="paste-modal-overlay" onClick={() => setPasteTarget(null)}>
+          <div className="paste-modal" onClick={e => e.stopPropagation()}>
+            <div className="paste-modal__header">
+              <h3><ClipboardPaste size={18} /> Paste Resume Text</h3>
+              <button className="btn-icon" onClick={() => setPasteTarget(null)}><X size={18} /></button>
+            </div>
+            <p className="paste-modal__hint">
+              Open <strong>{resumeDataList[pasteTarget]?.fileName}</strong> in Word, select all text (Ctrl+A), copy (Ctrl+C), then paste below:
+            </p>
+            <textarea
+              className="paste-modal__textarea"
+              placeholder="Paste the full resume text here..."
+              value={pasteText}
+              onChange={e => setPasteText(e.target.value)}
+              rows={14}
+              autoFocus
+            />
+            <div className="paste-modal__actions">
+              <button className="btn btn--secondary" onClick={() => setPasteTarget(null)}>Cancel</button>
+              <button className="btn btn--primary" disabled={!pasteText.trim()} onClick={handlePasteSubmit}>
+                Process Resume
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
